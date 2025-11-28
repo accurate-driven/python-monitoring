@@ -19,6 +19,8 @@ class Config:
     
     # Screenshot Settings
     SCREENSHOT_INTERVAL: float = float(os.getenv('SCREENSHOT_INTERVAL', '3.0'))
+    SCREENSHOT_IDLE_INTERVAL: float = float(os.getenv('SCREENSHOT_IDLE_INTERVAL', '30.0'))  # When no activity
+    SCREENSHOT_ACTIVITY_TIMEOUT: float = float(os.getenv('SCREENSHOT_ACTIVITY_TIMEOUT', '5.0'))  # Seconds of inactivity before switching to idle
     SCREENSHOT_QUALITY: int = int(os.getenv('SCREENSHOT_QUALITY', '50'))
     SCREENSHOT_SCALE: float = float(os.getenv('SCREENSHOT_SCALE', '1.0'))
     

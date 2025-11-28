@@ -77,10 +77,15 @@ class TimeTracker:
         """
         # Use Config values if parameters are None
         self.screenshot_interval = screenshot_interval if screenshot_interval is not None else Config.SCREENSHOT_INTERVAL
+        self.screenshot_idle_interval = Config.SCREENSHOT_IDLE_INTERVAL
         self.screenshot_quality = max(1, min(100, screenshot_quality if screenshot_quality is not None else Config.SCREENSHOT_QUALITY))
         self.screenshot_scale = max(0.1, min(1.0, screenshot_scale if screenshot_scale is not None else Config.SCREENSHOT_SCALE))
         self.data_dir = Path(data_dir if data_dir is not None else Config.DATA_DIR)
         self.data_dir.mkdir(exist_ok=True)
+        
+        # Activity tracking for adaptive screenshot intervals
+        self.last_activity_time = datetime.now()
+        self.activity_timeout = Config.SCREENSHOT_ACTIVITY_TIMEOUT  # Consider idle if no activity for this many seconds
         
         # Folder rotation settings from Config
         self.folder_rotation_interval = Config.FOLDER_ROTATION_INTERVAL
@@ -131,8 +136,7 @@ class TimeTracker:
         self.b2_api: Optional[B2Api] = None
         self.b2_bucket = None
         
-        # Track completed folders for upload
-        self.completed_folders_queue = queue.Queue()
+        # No queue needed - upload previous folder immediately when new one is created
         
         # Initialize B2 if configured
         if self.upload_to_b2 and self.b2_key_id and self.b2_key and self.b2_bucket_name:
@@ -146,9 +150,9 @@ class TimeTracker:
             print("Warning: B2 credentials not provided. Upload disabled.")
             self.upload_to_b2 = False
         
-        # Queue existing session folders for upload on startup
+        # Upload existing session folders on startup
         if self.upload_to_b2:
-            self._queue_existing_folders_for_upload()
+            self._upload_existing_folders_on_startup()
     
     def _get_folder_size(self, folder_path: Path) -> int:
         """Calculate total size of folder in bytes"""
@@ -161,9 +165,20 @@ class TimeTracker:
             pass
         return total_size
     
-    def _queue_existing_folders_for_upload(self):
-        """Queue all existing session folders for upload on startup"""
-        if not self.data_dir.exists():
+    def _upload_folder_async(self, folder_path: Path):
+        """Upload a folder to B2 in a background thread"""
+        def upload_thread():
+            if folder_path.exists() and self.upload_to_b2:
+                print(f"Uploading previous folder: {folder_path.name}")
+                self._upload_folder_to_b2(folder_path)
+        
+        if self.upload_to_b2:
+            thread = threading.Thread(target=upload_thread, daemon=True)
+            thread.start()
+    
+    def _upload_existing_folders_on_startup(self):
+        """Upload all existing session folders on startup"""
+        if not self.data_dir.exists() or not self.upload_to_b2:
             return
         
         # Find all session folders
@@ -178,8 +193,8 @@ class TimeTracker:
             print(f"Found {len(session_folders)} existing session folder(s) to upload")
             for folder in sorted(session_folders):
                 if folder.exists():
-                    print(f"  Queueing: {folder.name}")
-                    self.completed_folders_queue.put(folder)
+                    print(f"  Uploading: {folder.name}")
+                    self._upload_folder_async(folder)
         else:
             print("No existing session folders found to upload")
     
@@ -291,10 +306,8 @@ class TimeTracker:
     
     def _create_new_session_folder(self):
         """Create a new session folder with timestamp"""
-        # If we have a previous session folder and upload is enabled, queue it for upload
-        if self.previous_session_dir and self.previous_session_dir.exists() and self.upload_to_b2:
-            print(f"Queueing folder for B2 upload: {self.previous_session_dir.name}")
-            self.completed_folders_queue.put(self.previous_session_dir)
+        # Save current folder as previous BEFORE creating new one (so we can upload it)
+        folder_to_upload = self.current_session_dir
         
         # Ensure parent data directory exists
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -310,12 +323,17 @@ class TimeTracker:
         if not session_folder.exists():
             raise RuntimeError(f"Failed to create session folder: {session_folder}")
         
-        # Update previous session before setting new current
-        self.previous_session_dir = self.current_session_dir
+        # Update previous and current session
+        self.previous_session_dir = folder_to_upload
         self.current_session_dir = session_folder
         self.session_start_time = datetime.now()
         
         print(f"Created new session folder: {session_folder.name}")
+        
+        # Upload the previous folder (now that we've saved it) if it exists
+        if folder_to_upload and folder_to_upload.exists() and self.upload_to_b2:
+            print(f"Uploading previous folder: {folder_to_upload.name}")
+            self._upload_folder_async(folder_to_upload)
     
     def _check_and_rotate_folder(self):
         """Check if folder rotation is needed and create new folder if necessary"""
@@ -502,7 +520,7 @@ class TimeTracker:
             return None
     
     def screenshot_loop(self):
-        """Main loop for capturing screenshots at intervals"""
+        """Main loop for capturing screenshots at adaptive intervals"""
         # Create MSS instance in this thread (required for Windows)
         sct = mss.mss()
         
@@ -515,7 +533,21 @@ class TimeTracker:
                     "data": screenshot_data
                 })
             
-            time.sleep(self.screenshot_interval)
+            # Use adaptive interval based on activity
+            time_since_activity = (datetime.now() - self.last_activity_time).total_seconds()
+            if time_since_activity >= self.activity_timeout:
+                # Idle: use longer interval
+                current_interval = self.screenshot_idle_interval
+            else:
+                # Active: use normal interval
+                current_interval = self.screenshot_interval
+            
+            # Debug: print interval being used (only occasionally to avoid spam)
+            if int(time_since_activity) % 10 == 0 and int(time_since_activity) > 0:  # Print every 10 seconds
+                mode = "IDLE" if time_since_activity >= self.activity_timeout else "ACTIVE"
+                print(f"[Screenshot] {mode} mode: {time_since_activity:.1f}s since activity, interval={current_interval:.1f}s")
+            
+            time.sleep(current_interval)
     
     def on_key_press(self, key):
         """Handle key press events (not logged, only key releases are logged)"""
@@ -526,6 +558,9 @@ class TimeTracker:
     def on_key_release(self, key):
         """Handle key release events"""
         try:
+            # Update activity time
+            self.last_activity_time = datetime.now()
+            
             key_name = None
             if hasattr(key, 'char') and key.char:
                 key_name = key.char
@@ -550,6 +585,9 @@ class TimeTracker:
     def on_mouse_click(self, x, y, button, pressed):
         """Handle mouse click events"""
         try:
+            # Update activity time
+            self.last_activity_time = datetime.now()
+            
             event = {
                 "type": "mouse_click" if pressed else "mouse_release",
                 "timestamp": datetime.now().isoformat(),
@@ -846,30 +884,6 @@ class TimeTracker:
             except Exception as e:
                 print(f"Error writing processes: {e}")
     
-    def b2_upload_worker(self):
-        """Background thread to upload completed folders to B2"""
-        print("B2 upload worker started")
-        while self.running or not self.completed_folders_queue.empty():
-            try:
-                folder_path = self.completed_folders_queue.get(timeout=5)
-                print(f"B2 upload worker: Processing folder {folder_path.name}")
-                
-                if not folder_path.exists():
-                    print(f"Warning: Folder {folder_path.name} no longer exists, skipping upload")
-                    continue
-                
-                # Upload folder to B2 (compresses, uploads, and deletes automatically)
-                print(f"Starting upload of {folder_path.name} to B2...")
-                success = self._upload_folder_to_b2(folder_path)
-                
-                # Note: Folder and zip are automatically deleted after successful upload
-                # No need for delete_after_upload check here
-                
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"Error in B2 upload worker: {e}")
-    
     def start(self):
         """Start tracking"""
         if self.running:
@@ -899,11 +913,6 @@ class TimeTracker:
         process_writer_thread = threading.Thread(target=self.process_writer, daemon=True)
         process_writer_thread.start()
         
-        # Start B2 upload thread if enabled
-        if self.upload_to_b2:
-            b2_upload_thread = threading.Thread(target=self.b2_upload_worker, daemon=True)
-            b2_upload_thread.start()
-        
         # Start keyboard listener
         self.keyboard_listener = keyboard.Listener(
             on_press=self.on_key_press,
@@ -930,10 +939,10 @@ class TimeTracker:
         print("\nStopping time tracker...")
         self.running = False
         
-        # Queue current folder for upload if enabled
+        # Upload current folder if enabled
         if self.upload_to_b2 and self.current_session_dir and self.current_session_dir.exists():
-            print(f"Queueing current folder for upload: {self.current_session_dir.name}")
-            self.completed_folders_queue.put(self.current_session_dir)
+            print(f"Uploading current folder: {self.current_session_dir.name}")
+            self._upload_folder_async(self.current_session_dir)
         
         # Stop listeners
         if self.keyboard_listener:
@@ -944,17 +953,6 @@ class TimeTracker:
         # Wait for threads to finish
         if self.screenshot_thread:
             self.screenshot_thread.join(timeout=5)
-        
-        # Wait for uploads to complete (with timeout)
-        if self.upload_to_b2 and not self.completed_folders_queue.empty():
-            print("Waiting for B2 uploads to complete...")
-            import time
-            timeout = 60  # Wait up to 60 seconds
-            start_time = time.time()
-            while not self.completed_folders_queue.empty() and (time.time() - start_time) < timeout:
-                time.sleep(1)
-            if not self.completed_folders_queue.empty():
-                print(f"Warning: {self.completed_folders_queue.qsize()} folders still queued for upload")
         
         # Print statistics
         print("\n=== Tracking Statistics ===")
