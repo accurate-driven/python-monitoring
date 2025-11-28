@@ -237,10 +237,12 @@ def print_report(data_dir: Path):
     
     # Screenshot count
     if screenshots_dir.exists():
-        screenshot_count = len(list(screenshots_dir.glob("*.png")))
+        screenshot_count_png = len(list(screenshots_dir.glob("*.png")))
+        screenshot_count_jpg = len(list(screenshots_dir.glob("*.jpg")))
+        screenshot_count = screenshot_count_png + screenshot_count_jpg
         print("SCREENSHOTS")
         print("-" * 60)
-        print(f"Total screenshots: {screenshot_count}")
+        print(f"Total screenshots: {screenshot_count} ({screenshot_count_jpg} JPEG, {screenshot_count_png} PNG)")
         print(f"Location: {screenshots_dir.absolute()}")
         print()
     
@@ -256,7 +258,23 @@ def main():
         print("Run t.py first to collect data.")
         return
     
-    print_report(data_dir)
+    # Check if we have session folders (new structure) or old flat structure
+    session_folders = sorted([d for d in data_dir.iterdir() if d.is_dir() and d.name.startswith("session_")])
+    
+    if session_folders:
+        print(f"Found {len(session_folders)} session folder(s)")
+        print("=" * 60)
+        print()
+        
+        # Analyze all sessions
+        for session_folder in session_folders:
+            print(f"SESSION: {session_folder.name}")
+            print("-" * 60)
+            print_report(session_folder)
+            print()
+    else:
+        # Old structure - analyze directly
+        print_report(data_dir)
 
 
 if __name__ == "__main__":

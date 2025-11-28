@@ -59,13 +59,18 @@ class TimeTracker:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
         
-        # Screenshot storage
-        self.screenshots_dir = self.data_dir / "screenshots"
-        self.screenshots_dir.mkdir(exist_ok=True)
+        # Folder rotation settings
+        self.folder_rotation_interval = 600  # 10 minutes in seconds
+        self.folder_max_size_mb = 100  # 100 MB
+        self.folder_max_size_bytes = self.folder_max_size_mb * 1024 * 1024
         
-        # Event storage
-        self.events_file = self.data_dir / "events.jsonl"
-        self.processes_file = self.data_dir / "processes.jsonl"
+        # Current session folder tracking
+        self.current_session_dir: Optional[Path] = None
+        self.session_start_time: Optional[datetime] = None
+        self._session_lock = threading.Lock()  # Lock for thread-safe folder rotation
+        
+        # Initialize first session folder
+        self._create_new_session_folder()
         
         # State
         self.running = False
@@ -91,6 +96,68 @@ class TimeTracker:
         
         # Process tracking for change detection
         self.previous_processes: Dict[int, Dict] = {}  # pid -> process info
+    
+    def _get_folder_size(self, folder_path: Path) -> int:
+        """Calculate total size of folder in bytes"""
+        total_size = 0
+        try:
+            for file_path in folder_path.rglob('*'):
+                if file_path.is_file():
+                    total_size += file_path.stat().st_size
+        except Exception:
+            pass
+        return total_size
+    
+    def _create_new_session_folder(self):
+        """Create a new session folder with timestamp"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_folder = self.data_dir / f"session_{timestamp}"
+        session_folder.mkdir(exist_ok=True)
+        
+        # Create subdirectories
+        (session_folder / "screenshots").mkdir(exist_ok=True)
+        
+        self.current_session_dir = session_folder
+        self.session_start_time = datetime.now()
+        
+        print(f"Created new session folder: {session_folder.name}")
+    
+    def _check_and_rotate_folder(self):
+        """Check if folder rotation is needed and create new folder if necessary"""
+        with self._session_lock:
+            if not self.current_session_dir or not self.session_start_time:
+                self._create_new_session_folder()
+                return
+            
+            # Check time-based rotation (10 minutes)
+            elapsed_seconds = (datetime.now() - self.session_start_time).total_seconds()
+            if elapsed_seconds >= self.folder_rotation_interval:
+                print(f"Rotating folder: {elapsed_seconds:.0f} seconds elapsed (10 min limit)")
+                self._create_new_session_folder()
+                return
+            
+            # Check size-based rotation (100 MB)
+            folder_size = self._get_folder_size(self.current_session_dir)
+            if folder_size >= self.folder_max_size_bytes:
+                size_mb = folder_size / (1024 * 1024)
+                print(f"Rotating folder: {size_mb:.2f} MB reached (100 MB limit)")
+                self._create_new_session_folder()
+                return
+    
+    def _get_screenshots_dir(self) -> Path:
+        """Get current screenshots directory, rotating if needed"""
+        self._check_and_rotate_folder()
+        return self.current_session_dir / "screenshots"
+    
+    def _get_events_file(self) -> Path:
+        """Get current events file path, rotating if needed"""
+        self._check_and_rotate_folder()
+        return self.current_session_dir / "events.jsonl"
+    
+    def _get_processes_file(self) -> Path:
+        """Get current processes file path, rotating if needed"""
+        self._check_and_rotate_folder()
+        return self.current_session_dir / "processes.jsonl"
     
     def draw_cursor(self, img: Image.Image, cursor_x: int, cursor_y: int, monitor_left: int, monitor_top: int):
         """Draw mouse cursor on the screenshot"""
@@ -167,7 +234,8 @@ class TimeTracker:
                 
                 # Save screenshot as JPEG with compression (much smaller than PNG)
                 filename = f"{timestamp.replace(':', '-').replace('.', '-')}_monitor_{i}.jpg"
-                filepath = self.screenshots_dir / filename
+                screenshots_dir = self._get_screenshots_dir()
+                filepath = screenshots_dir / filename
                 # Ensure RGB mode for JPEG
                 if img.mode != "RGB":
                     img = img.convert("RGB")
@@ -532,7 +600,8 @@ class TimeTracker:
         while self.running or not self.event_queue.empty():
             try:
                 event = self.event_queue.get(timeout=1)
-                with open(self.events_file, 'a', encoding='utf-8') as f:
+                events_file = self._get_events_file()
+                with open(events_file, 'a', encoding='utf-8') as f:
                     f.write(json.dumps(event) + '\n')
             except queue.Empty:
                 continue
@@ -544,7 +613,8 @@ class TimeTracker:
         while self.running or not self.process_queue.empty():
             try:
                 processes = self.process_queue.get(timeout=1)
-                with open(self.processes_file, 'a', encoding='utf-8') as f:
+                processes_file = self._get_processes_file()
+                with open(processes_file, 'a', encoding='utf-8') as f:
                     # Write each process on a separate line for better readability
                     for process in processes:
                         f.write(json.dumps(process, ensure_ascii=False) + '\n')
@@ -595,6 +665,8 @@ class TimeTracker:
         
         print("Time tracker started!")
         print(f"Data will be saved to: {self.data_dir.absolute()}")
+        print(f"Current session folder: {self.current_session_dir.name if self.current_session_dir else 'N/A'}")
+        print("Folders will rotate every 10 minutes or when reaching 100 MB")
         print("Press Ctrl+C to stop")
     
     def stop(self):
