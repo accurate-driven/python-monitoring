@@ -40,10 +40,30 @@ sudo apt-get install scrot
 
 ## Usage
 
+### Running from Source
+
 Run the tracker:
 ```bash
 python t.py
 ```
+
+### Building Standalone Executable
+
+To build a standalone executable (no Python installation required):
+
+1. Install build dependencies:
+   ```bash
+   pip install -r requirements-build.txt
+   ```
+
+2. Build the application:
+   ```bash
+   python build.py
+   ```
+
+3. The executable will be in the `dist/` directory
+
+See `BUILD.md` for detailed build instructions.
 
 The application will:
 - Start capturing screenshots every 2 seconds

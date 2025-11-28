@@ -86,6 +86,7 @@ class TimeTracker:
         # Activity tracking for adaptive screenshot intervals
         self.last_activity_time = datetime.now()
         self.activity_timeout = Config.SCREENSHOT_ACTIVITY_TIMEOUT  # Consider idle if no activity for this many seconds
+        self.activity_event = threading.Event()  # Wakes screenshot loop when activity happens
         
         # Folder rotation settings from Config
         self.folder_rotation_interval = Config.FOLDER_ROTATION_INTERVAL
@@ -547,7 +548,11 @@ class TimeTracker:
                 mode = "IDLE" if time_since_activity >= self.activity_timeout else "ACTIVE"
                 print(f"[Screenshot] {mode} mode: {time_since_activity:.1f}s since activity, interval={current_interval:.1f}s")
             
-            time.sleep(current_interval)
+            # Wait for either activity or timeout
+            activity_triggered = self.activity_event.wait(timeout=current_interval)
+            if activity_triggered:
+                # Clear event so next wait can block
+                self.activity_event.clear()
     
     def on_key_press(self, key):
         """Handle key press events (not logged, only key releases are logged)"""
@@ -559,7 +564,7 @@ class TimeTracker:
         """Handle key release events"""
         try:
             # Update activity time
-            self.last_activity_time = datetime.now()
+            self._mark_activity()
             
             key_name = None
             if hasattr(key, 'char') and key.char:
@@ -586,7 +591,7 @@ class TimeTracker:
         """Handle mouse click events"""
         try:
             # Update activity time
-            self.last_activity_time = datetime.now()
+            self._mark_activity()
             
             event = {
                 "type": "mouse_click" if pressed else "mouse_release",
@@ -852,6 +857,11 @@ class TimeTracker:
         """Log event to file (thread-safe)"""
         self.event_queue.put(event)
     
+    def _mark_activity(self):
+        """Update last activity timestamp and wake screenshot loop"""
+        self.last_activity_time = datetime.now()
+        self.activity_event.set()
+    
     def log_processes(self, processes: List[Dict]):
         """Log processes to file (thread-safe)"""
         self.process_queue.put(processes)
@@ -938,6 +948,7 @@ class TimeTracker:
         
         print("\nStopping time tracker...")
         self.running = False
+        self.activity_event.set()  # Wake screenshot loop if waiting
         
         # Upload current folder if enabled
         if self.upload_to_b2 and self.current_session_dir and self.current_session_dir.exists():

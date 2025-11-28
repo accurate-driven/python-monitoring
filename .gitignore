@@ -43,3 +43,6 @@ Thumbs.db
 # Environment variables
 .env
 
+# Generated config (embedded during build)
+config_values.py
+
