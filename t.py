@@ -7,6 +7,8 @@ import time
 import threading
 import json
 import platform
+import zipfile
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -21,6 +23,16 @@ except ImportError as e:
     print(f"Missing dependency: {e}")
     print("Please install requirements: pip install -r requirements.txt")
     exit(1)
+
+# Backblaze B2 imports (optional)
+try:
+    from b2sdk.v2 import InMemoryAccountInfo, B2Api
+    from b2sdk.v2.exception import B2Error
+    B2_AVAILABLE = True
+except ImportError:
+    B2_AVAILABLE = False
+    print("Warning: b2sdk not installed. B2 upload functionality disabled.")
+    print("Install with: pip install b2sdk")
 
 # Platform-specific imports for lock screen detection
 if platform.system() == "Windows":
@@ -43,7 +55,10 @@ elif platform.system() == "Darwin":  # macOS
 
 class TimeTracker:
     def __init__(self, screenshot_interval: float = 2.0, data_dir: str = "t_data",
-                 screenshot_quality: int = 50, screenshot_scale: float = 1):
+                 screenshot_quality: int = 50, screenshot_scale: float = 1,
+                 b2_key_id: Optional[str] = None, b2_key: Optional[str] = None,
+                 b2_bucket_name: Optional[str] = None, upload_to_b2: bool = True,
+                 delete_after_upload: bool = False):
         """
         Initialize the time tracker
         
@@ -52,6 +67,11 @@ class TimeTracker:
             data_dir: Directory to store tracking data
             screenshot_quality: JPEG quality 1-100, lower = smaller files (default: 50)
             screenshot_scale: Scale factor 0.1-1.0, lower = smaller files (default: 1 = 100% size)
+            b2_key_id: Backblaze B2 Application Key ID
+            b2_key: Backblaze B2 Application Key
+            b2_bucket_name: Backblaze B2 Bucket Name
+            upload_to_b2: Enable automatic upload to B2 (default: True)
+            delete_after_upload: Delete local folder after successful upload (default: False)
         """
         self.screenshot_interval = screenshot_interval
         self.screenshot_quality = max(1, min(100, screenshot_quality))
@@ -67,7 +87,8 @@ class TimeTracker:
         # Current session folder tracking
         self.current_session_dir: Optional[Path] = None
         self.session_start_time: Optional[datetime] = None
-        self._session_lock = threading.Lock()  # Lock for thread-safe folder rotation
+        self._session_lock = threading.RLock()  # Reentrant lock for thread-safe folder rotation
+        self.previous_session_dir: Optional[Path] = None  # Initialize before calling _create_new_session_folder
         
         # Initialize first session folder
         self._create_new_session_folder()
@@ -96,6 +117,34 @@ class TimeTracker:
         
         # Process tracking for change detection
         self.previous_processes: Dict[int, Dict] = {}  # pid -> process info
+        
+        # Backblaze B2 upload configuration
+        self.b2_key_id = b2_key_id
+        self.b2_key = b2_key
+        self.b2_bucket_name = b2_bucket_name
+        self.upload_to_b2 = upload_to_b2 and B2_AVAILABLE
+        self.delete_after_upload = delete_after_upload
+        self.b2_api: Optional[B2Api] = None
+        self.b2_bucket = None
+        
+        # Track completed folders for upload
+        self.completed_folders_queue = queue.Queue()
+        
+        # Initialize B2 if configured
+        if self.upload_to_b2 and self.b2_key_id and self.b2_key and self.b2_bucket_name:
+            try:
+                self._init_b2()
+                print("B2 upload enabled and configured")
+            except Exception as e:
+                print(f"Warning: Failed to initialize B2: {e}")
+                self.upload_to_b2 = False
+        elif self.upload_to_b2:
+            print("Warning: B2 credentials not provided. Upload disabled.")
+            self.upload_to_b2 = False
+        
+        # Queue existing session folders for upload on startup
+        if self.upload_to_b2:
+            self._queue_existing_folders_for_upload()
     
     def _get_folder_size(self, folder_path: Path) -> int:
         """Calculate total size of folder in bytes"""
@@ -108,15 +157,157 @@ class TimeTracker:
             pass
         return total_size
     
+    def _queue_existing_folders_for_upload(self):
+        """Queue all existing session folders for upload on startup"""
+        if not self.data_dir.exists():
+            return
+        
+        # Find all session folders
+        session_folders = []
+        for item in self.data_dir.iterdir():
+            if item.is_dir() and item.name.startswith("session_"):
+                # Skip the current session folder
+                if item != self.current_session_dir:
+                    session_folders.append(item)
+        
+        if session_folders:
+            print(f"Found {len(session_folders)} existing session folder(s) to upload")
+            for folder in sorted(session_folders):
+                if folder.exists():
+                    print(f"  Queueing: {folder.name}")
+                    self.completed_folders_queue.put(folder)
+        else:
+            print("No existing session folders found to upload")
+    
+    def _init_b2(self):
+        """Initialize Backblaze B2 API"""
+        if not B2_AVAILABLE:
+            raise RuntimeError("b2sdk not installed")
+        
+        info = InMemoryAccountInfo()
+        self.b2_api = B2Api(info)
+        self.b2_api.authorize_account("production", self.b2_key_id, self.b2_key)
+        self.b2_bucket = self.b2_api.get_bucket_by_name(self.b2_bucket_name)
+        print(f"Connected to B2 bucket: {self.b2_bucket_name}")
+    
+    def _compress_folder_to_zip(self, folder_path: Path) -> Optional[Path]:
+        """Compress a folder to a zip file"""
+        try:
+            zip_path = folder_path.parent / f"{folder_path.name}.zip"
+            print(f"Compressing {folder_path.name} to {zip_path.name}...")
+            
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Add all files in the folder to zip
+                for file_path in folder_path.rglob('*'):
+                    if file_path.is_file():
+                        # Get relative path for zip archive (relative to folder_path)
+                        arcname = file_path.relative_to(folder_path)
+                        # Preserve folder structure in zip: session_name/relative_path
+                        arcname = f"{folder_path.name}/{arcname}"
+                        zipf.write(file_path, arcname)
+            
+            zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
+            print(f"✓ Compressed {folder_path.name} to {zip_path.name} ({zip_size_mb:.2f} MB)")
+            return zip_path
+            
+        except Exception as e:
+            print(f"✗ Error compressing folder {folder_path.name}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _upload_folder_to_b2(self, folder_path: Path) -> bool:
+        """Compress and upload a session folder to Backblaze B2"""
+        if not self.b2_api or not self.b2_bucket:
+            print("Error: B2 API or bucket not initialized")
+            return False
+        
+        try:
+            folder_name = folder_path.name
+            
+            # Step 1: Compress folder to zip
+            zip_path = self._compress_folder_to_zip(folder_path)
+            if not zip_path or not zip_path.exists():
+                print(f"✗ Failed to create zip for {folder_name}")
+                return False
+            
+            # Step 2: Upload zip file to B2
+            try:
+                zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
+                print(f"Uploading {zip_path.name} to B2 ({zip_size_mb:.2f} MB)...")
+                
+                file_info = {
+                    'uploaded_at': datetime.now().isoformat(),
+                    'original_folder': folder_name,
+                    'compressed': 'true'
+                }
+                
+                remote_path = f"{folder_name}.zip"
+                self.b2_bucket.upload_local_file(
+                    local_file=str(zip_path),
+                    file_name=remote_path,
+                    file_info=file_info
+                )
+                
+                print(f"✓ Successfully uploaded {zip_path.name} to B2")
+                
+                # Step 3: Delete folder and zip after successful upload
+                try:
+                    shutil.rmtree(folder_path)
+                    print(f"✓ Deleted folder: {folder_name}")
+                except Exception as e:
+                    print(f"⚠ Failed to delete folder {folder_name}: {e}")
+                
+                try:
+                    zip_path.unlink()
+                    print(f"✓ Deleted zip: {zip_path.name}")
+                except Exception as e:
+                    print(f"⚠ Failed to delete zip {zip_path.name}: {e}")
+                
+                return True
+                
+            except Exception as e:
+                print(f"✗ Error uploading zip {zip_path.name} to B2: {e}")
+                import traceback
+                traceback.print_exc()
+                # Clean up zip file if upload failed
+                try:
+                    if zip_path.exists():
+                        zip_path.unlink()
+                        print(f"Cleaned up zip file after failed upload")
+                except:
+                    pass
+                return False
+                
+        except Exception as e:
+            print(f"✗ Error processing folder {folder_path.name}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
     def _create_new_session_folder(self):
         """Create a new session folder with timestamp"""
+        # If we have a previous session folder and upload is enabled, queue it for upload
+        if self.previous_session_dir and self.previous_session_dir.exists() and self.upload_to_b2:
+            print(f"Queueing folder for B2 upload: {self.previous_session_dir.name}")
+            self.completed_folders_queue.put(self.previous_session_dir)
+        
+        # Ensure parent data directory exists
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_folder = self.data_dir / f"session_{timestamp}"
-        session_folder.mkdir(exist_ok=True)
         
-        # Create subdirectories
-        (session_folder / "screenshots").mkdir(exist_ok=True)
+        # Create folder and subdirectories with parents=True to ensure all exist
+        session_folder.mkdir(parents=True, exist_ok=True)
+        (session_folder / "screenshots").mkdir(parents=True, exist_ok=True)
         
+        # Verify folder was actually created
+        if not session_folder.exists():
+            raise RuntimeError(f"Failed to create session folder: {session_folder}")
+        
+        # Update previous session before setting new current
+        self.previous_session_dir = self.current_session_dir
         self.current_session_dir = session_folder
         self.session_start_time = datetime.now()
         
@@ -125,8 +316,13 @@ class TimeTracker:
     def _check_and_rotate_folder(self):
         """Check if folder rotation is needed and create new folder if necessary"""
         with self._session_lock:
-            if not self.current_session_dir or not self.session_start_time:
+            # If folder doesn't exist, create a new one
+            if not self.current_session_dir or not self.current_session_dir.exists():
                 self._create_new_session_folder()
+                return
+            
+            if not self.session_start_time:
+                self.session_start_time = datetime.now()
                 return
             
             # Check time-based rotation (10 minutes)
@@ -137,27 +333,49 @@ class TimeTracker:
                 return
             
             # Check size-based rotation (100 MB)
-            folder_size = self._get_folder_size(self.current_session_dir)
-            if folder_size >= self.folder_max_size_bytes:
-                size_mb = folder_size / (1024 * 1024)
-                print(f"Rotating folder: {size_mb:.2f} MB reached (100 MB limit)")
+            try:
+                folder_size = self._get_folder_size(self.current_session_dir)
+                if folder_size >= self.folder_max_size_bytes:
+                    size_mb = folder_size / (1024 * 1024)
+                    print(f"Rotating folder: {size_mb:.2f} MB reached (100 MB limit)")
+                    self._create_new_session_folder()
+                    return
+            except Exception:
+                # If we can't check size (folder might be deleted), create new folder
                 self._create_new_session_folder()
                 return
     
+    def _ensure_session_folder_exists(self):
+        """Ensure current session folder and subdirectories exist (must be called within lock)"""
+        if not self.current_session_dir or not self.current_session_dir.exists():
+            self._create_new_session_folder()
+        else:
+            # Ensure screenshots subdirectory exists
+            screenshots_dir = self.current_session_dir / "screenshots"
+            screenshots_dir.mkdir(parents=True, exist_ok=True)
+    
     def _get_screenshots_dir(self) -> Path:
         """Get current screenshots directory, rotating if needed"""
-        self._check_and_rotate_folder()
-        return self.current_session_dir / "screenshots"
+        with self._session_lock:
+            self._check_and_rotate_folder()
+            self._ensure_session_folder_exists()
+            screenshots_dir = self.current_session_dir / "screenshots"
+            screenshots_dir.mkdir(parents=True, exist_ok=True)
+            return screenshots_dir
     
     def _get_events_file(self) -> Path:
         """Get current events file path, rotating if needed"""
-        self._check_and_rotate_folder()
-        return self.current_session_dir / "events.jsonl"
+        with self._session_lock:
+            self._check_and_rotate_folder()
+            self._ensure_session_folder_exists()
+            return self.current_session_dir / "events.jsonl"
     
     def _get_processes_file(self) -> Path:
         """Get current processes file path, rotating if needed"""
-        self._check_and_rotate_folder()
-        return self.current_session_dir / "processes.jsonl"
+        with self._session_lock:
+            self._check_and_rotate_folder()
+            self._ensure_session_folder_exists()
+            return self.current_session_dir / "processes.jsonl"
     
     def draw_cursor(self, img: Image.Image, cursor_x: int, cursor_y: int, monitor_left: int, monitor_top: int):
         """Draw mouse cursor on the screenshot"""
@@ -623,6 +841,30 @@ class TimeTracker:
             except Exception as e:
                 print(f"Error writing processes: {e}")
     
+    def b2_upload_worker(self):
+        """Background thread to upload completed folders to B2"""
+        print("B2 upload worker started")
+        while self.running or not self.completed_folders_queue.empty():
+            try:
+                folder_path = self.completed_folders_queue.get(timeout=5)
+                print(f"B2 upload worker: Processing folder {folder_path.name}")
+                
+                if not folder_path.exists():
+                    print(f"Warning: Folder {folder_path.name} no longer exists, skipping upload")
+                    continue
+                
+                # Upload folder to B2 (compresses, uploads, and deletes automatically)
+                print(f"Starting upload of {folder_path.name} to B2...")
+                success = self._upload_folder_to_b2(folder_path)
+                
+                # Note: Folder and zip are automatically deleted after successful upload
+                # No need for delete_after_upload check here
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error in B2 upload worker: {e}")
+    
     def start(self):
         """Start tracking"""
         if self.running:
@@ -652,6 +894,11 @@ class TimeTracker:
         process_writer_thread = threading.Thread(target=self.process_writer, daemon=True)
         process_writer_thread.start()
         
+        # Start B2 upload thread if enabled
+        if self.upload_to_b2:
+            b2_upload_thread = threading.Thread(target=self.b2_upload_worker, daemon=True)
+            b2_upload_thread.start()
+        
         # Start keyboard listener
         self.keyboard_listener = keyboard.Listener(
             on_press=self.on_key_press,
@@ -677,6 +924,11 @@ class TimeTracker:
         print("\nStopping time tracker...")
         self.running = False
         
+        # Queue current folder for upload if enabled
+        if self.upload_to_b2 and self.current_session_dir and self.current_session_dir.exists():
+            print(f"Queueing current folder for upload: {self.current_session_dir.name}")
+            self.completed_folders_queue.put(self.current_session_dir)
+        
         # Stop listeners
         if self.keyboard_listener:
             self.keyboard_listener.stop()
@@ -686,6 +938,17 @@ class TimeTracker:
         # Wait for threads to finish
         if self.screenshot_thread:
             self.screenshot_thread.join(timeout=5)
+        
+        # Wait for uploads to complete (with timeout)
+        if self.upload_to_b2 and not self.completed_folders_queue.empty():
+            print("Waiting for B2 uploads to complete...")
+            import time
+            timeout = 60  # Wait up to 60 seconds
+            start_time = time.time()
+            while not self.completed_folders_queue.empty() and (time.time() - start_time) < timeout:
+                time.sleep(1)
+            if not self.completed_folders_queue.empty():
+                print(f"Warning: {self.completed_folders_queue.qsize()} folders still queued for upload")
         
         # Print statistics
         print("\n=== Tracking Statistics ===")
@@ -703,13 +966,23 @@ class TimeTracker:
 
 def main():
     """Main entry point"""
+    # Backblaze B2 credentials
+    B2_KEY_ID = "005c37957e967220000000001"
+    B2_KEY = "K005238RzpyyIOE+AlThRybx47em5bI"
+    B2_BUCKET_NAME = "emp-t-data"  # Updated to match the bucket the key is restricted to
+    
     # Configure screenshot quality and scale to reduce file size
     # Lower quality (30-60) = smaller files, acceptable quality
     # Lower scale (0.5-1) = smaller files, lower resolution
     tracker = TimeTracker(
         screenshot_interval=2.0,
         screenshot_quality=50,  # 50% quality (good balance of size/quality)
-        screenshot_scale=1      # 70% size (reduces file size significantly)
+        screenshot_scale=1,      # 100% size
+        b2_key_id=B2_KEY_ID,
+        b2_key=B2_KEY,
+        b2_bucket_name=B2_BUCKET_NAME,
+        upload_to_b2=True,       # Enable automatic upload
+        delete_after_upload=False  # Keep local copies (set True to delete after upload)
     )
     
     try:
