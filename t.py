@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import queue
 
+from config import Config
+
 try:
     import mss
     from pynput import keyboard, mouse
@@ -54,35 +56,36 @@ elif platform.system() == "Darwin":  # macOS
 
 
 class TimeTracker:
-    def __init__(self, screenshot_interval: float = 2.0, data_dir: str = "t_data",
-                 screenshot_quality: int = 50, screenshot_scale: float = 1,
+    def __init__(self, screenshot_interval: Optional[float] = None, data_dir: Optional[str] = None,
+                 screenshot_quality: Optional[int] = None, screenshot_scale: Optional[float] = None,
                  b2_key_id: Optional[str] = None, b2_key: Optional[str] = None,
-                 b2_bucket_name: Optional[str] = None, upload_to_b2: bool = True,
-                 delete_after_upload: bool = False):
+                 b2_bucket_name: Optional[str] = None, upload_to_b2: Optional[bool] = None,
+                 delete_after_upload: Optional[bool] = None):
         """
         Initialize the time tracker
         
         Args:
-            screenshot_interval: Interval in seconds between screenshots (default: 2.0)
-            data_dir: Directory to store tracking data
-            screenshot_quality: JPEG quality 1-100, lower = smaller files (default: 50)
-            screenshot_scale: Scale factor 0.1-1.0, lower = smaller files (default: 1 = 100% size)
-            b2_key_id: Backblaze B2 Application Key ID
-            b2_key: Backblaze B2 Application Key
-            b2_bucket_name: Backblaze B2 Bucket Name
-            upload_to_b2: Enable automatic upload to B2 (default: True)
-            delete_after_upload: Delete local folder after successful upload (default: False)
+            screenshot_interval: Interval in seconds between screenshots (uses Config.SCREENSHOT_INTERVAL if None)
+            data_dir: Directory to store tracking data (uses Config.DATA_DIR if None)
+            screenshot_quality: JPEG quality 1-100 (uses Config.SCREENSHOT_QUALITY if None)
+            screenshot_scale: Scale factor 0.1-1.0 (uses Config.SCREENSHOT_SCALE if None)
+            b2_key_id: Backblaze B2 Application Key ID (uses Config.B2_KEY_ID if None)
+            b2_key: Backblaze B2 Application Key (uses Config.B2_KEY if None)
+            b2_bucket_name: Backblaze B2 Bucket Name (uses Config.B2_BUCKET_NAME if None)
+            upload_to_b2: Enable automatic upload to B2 (uses Config.UPLOAD_TO_B2 if None)
+            delete_after_upload: Delete local folder after successful upload (uses Config.DELETE_AFTER_UPLOAD if None)
         """
-        self.screenshot_interval = screenshot_interval
-        self.screenshot_quality = max(1, min(100, screenshot_quality))
-        self.screenshot_scale = max(0.1, min(1.0, screenshot_scale))
-        self.data_dir = Path(data_dir)
+        # Use Config values if parameters are None
+        self.screenshot_interval = screenshot_interval if screenshot_interval is not None else Config.SCREENSHOT_INTERVAL
+        self.screenshot_quality = max(1, min(100, screenshot_quality if screenshot_quality is not None else Config.SCREENSHOT_QUALITY))
+        self.screenshot_scale = max(0.1, min(1.0, screenshot_scale if screenshot_scale is not None else Config.SCREENSHOT_SCALE))
+        self.data_dir = Path(data_dir if data_dir is not None else Config.DATA_DIR)
         self.data_dir.mkdir(exist_ok=True)
         
-        # Folder rotation settings
-        self.folder_rotation_interval = 600  # 10 minutes in seconds
-        self.folder_max_size_mb = 100  # 100 MB
-        self.folder_max_size_bytes = self.folder_max_size_mb * 1024 * 1024
+        # Folder rotation settings from Config
+        self.folder_rotation_interval = Config.FOLDER_ROTATION_INTERVAL
+        self.folder_max_size_mb = Config.FOLDER_MAX_SIZE_MB
+        self.folder_max_size_bytes = Config.get_folder_max_size_bytes()
         
         # Current session folder tracking
         self.current_session_dir: Optional[Path] = None
@@ -118,12 +121,13 @@ class TimeTracker:
         # Process tracking for change detection
         self.previous_processes: Dict[int, Dict] = {}  # pid -> process info
         
-        # Backblaze B2 upload configuration
-        self.b2_key_id = b2_key_id
-        self.b2_key = b2_key
-        self.b2_bucket_name = b2_bucket_name
-        self.upload_to_b2 = upload_to_b2 and B2_AVAILABLE
-        self.delete_after_upload = delete_after_upload
+        # Backblaze B2 upload configuration (use Config if None)
+        self.b2_key_id = b2_key_id if b2_key_id is not None else Config.B2_KEY_ID
+        self.b2_key = b2_key if b2_key is not None else Config.B2_KEY
+        self.b2_bucket_name = b2_bucket_name if b2_bucket_name is not None else Config.B2_BUCKET_NAME
+        upload_to_b2_value = upload_to_b2 if upload_to_b2 is not None else Config.UPLOAD_TO_B2
+        self.upload_to_b2 = upload_to_b2_value and B2_AVAILABLE
+        self.delete_after_upload = delete_after_upload if delete_after_upload is not None else Config.DELETE_AFTER_UPLOAD
         self.b2_api: Optional[B2Api] = None
         self.b2_bucket = None
         
@@ -325,19 +329,20 @@ class TimeTracker:
                 self.session_start_time = datetime.now()
                 return
             
-            # Check time-based rotation (10 minutes)
+            # Check time-based rotation
             elapsed_seconds = (datetime.now() - self.session_start_time).total_seconds()
             if elapsed_seconds >= self.folder_rotation_interval:
-                print(f"Rotating folder: {elapsed_seconds:.0f} seconds elapsed (10 min limit)")
+                minutes = self.folder_rotation_interval / 60
+                print(f"Rotating folder: {elapsed_seconds:.0f} seconds elapsed ({minutes:.0f} min limit)")
                 self._create_new_session_folder()
                 return
             
-            # Check size-based rotation (100 MB)
+            # Check size-based rotation
             try:
                 folder_size = self._get_folder_size(self.current_session_dir)
                 if folder_size >= self.folder_max_size_bytes:
                     size_mb = folder_size / (1024 * 1024)
-                    print(f"Rotating folder: {size_mb:.2f} MB reached (100 MB limit)")
+                    print(f"Rotating folder: {size_mb:.2f} MB reached ({self.folder_max_size_mb} MB limit)")
                     self._create_new_session_folder()
                     return
             except Exception:
@@ -913,7 +918,8 @@ class TimeTracker:
         print("Time tracker started!")
         print(f"Data will be saved to: {self.data_dir.absolute()}")
         print(f"Current session folder: {self.current_session_dir.name if self.current_session_dir else 'N/A'}")
-        print("Folders will rotate every 10 minutes or when reaching 100 MB")
+        minutes = self.folder_rotation_interval / 60
+        print(f"Folders will rotate every {minutes:.0f} minutes or when reaching {self.folder_max_size_mb} MB")
         print("Press Ctrl+C to stop")
     
     def stop(self):
@@ -966,24 +972,8 @@ class TimeTracker:
 
 def main():
     """Main entry point"""
-    # Backblaze B2 credentials
-    B2_KEY_ID = "005c37957e967220000000001"
-    B2_KEY = "K005238RzpyyIOE+AlThRybx47em5bI"
-    B2_BUCKET_NAME = "emp-t-data"  # Updated to match the bucket the key is restricted to
-    
-    # Configure screenshot quality and scale to reduce file size
-    # Lower quality (30-60) = smaller files, acceptable quality
-    # Lower scale (0.5-1) = smaller files, lower resolution
-    tracker = TimeTracker(
-        screenshot_interval=2.0,
-        screenshot_quality=50,  # 50% quality (good balance of size/quality)
-        screenshot_scale=1,      # 100% size
-        b2_key_id=B2_KEY_ID,
-        b2_key=B2_KEY,
-        b2_bucket_name=B2_BUCKET_NAME,
-        upload_to_b2=True,       # Enable automatic upload
-        delete_after_upload=False  # Keep local copies (set True to delete after upload)
-    )
+    # Create tracker with all settings from Config class (loaded from .env)
+    tracker = TimeTracker()
     
     try:
         tracker.start()
