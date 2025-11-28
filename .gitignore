@@ -24,7 +24,7 @@ wheels/
 *.egg
 
 # Tracking data
-tracking_data/
+t_data/
 *.png
 *.jpg
 *.jpeg

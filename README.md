@@ -42,20 +42,20 @@ sudo apt-get install scrot
 
 Run the tracker:
 ```bash
-python tracker.py
+python t.py
 ```
 
 The application will:
 - Start capturing screenshots every 2 seconds
 - Begin monitoring keyboard and mouse events
 - Track running processes every 5 seconds
-- Save all data to the `tracking_data` directory
+- Save all data to the `t_data` directory
 
 Press `Ctrl+C` to stop tracking.
 
 ## Data Storage
 
-All tracking data is saved in the `tracking_data` directory:
+All tracking data is saved in the `t_data` directory:
 
 - `screenshots/`: PNG images of all monitors with timestamps
 - `events.jsonl`: JSON Lines file containing keyboard and mouse events
@@ -92,11 +92,21 @@ Each process snapshot in `processes.jsonl`:
 
 ## Configuration
 
-You can modify the screenshot interval by editing `tracker.py`:
+You can modify screenshot settings by editing `t.py`:
 
 ```python
-tracker = TimeTracker(screenshot_interval=2.0)  # Change interval in seconds
+tracker = TimeTracker(
+    screenshot_interval=2.0,      # Interval in seconds between screenshots
+    screenshot_quality=60,       # JPEG quality 1-100 (lower = smaller files, default: 60)
+    screenshot_scale=0.7          # Scale factor 0.1-1.0 (lower = smaller files, default: 0.7)
+)
 ```
+
+**File Size Optimization:**
+- **Quality**: Lower values (30-60) create much smaller files with acceptable quality
+- **Scale**: Lower values (0.5-0.7) reduce resolution and file size significantly
+- **Example**: `quality=50, scale=0.6` can reduce file size by 10-20x compared to full-size PNG
+- Screenshots are saved as JPEG format (much smaller than PNG)
 
 ## Privacy & Legal Considerations
 
