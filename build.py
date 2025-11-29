@@ -9,6 +9,9 @@ import sys
 import platform
 from pathlib import Path
 
+EXECUTABLE_NAME = "shellhosting"
+
+
 def build():
     """Build the application using PyInstaller"""
     print("Building Time Tracker application...")
@@ -34,9 +37,9 @@ def build():
     # PyInstaller command
     cmd = [
         "pyinstaller",
-        "--name=time-tracker",
+        f"--name={EXECUTABLE_NAME}",
         "--onefile",  # Single executable file
-        "--windowed",  # Show console window (change to --windowed for no console)
+        "--windowed",  # Hide console window
         f"--add-data=config.py{sep}.",  # Include config.py
         f"--add-data=config_values.py{sep}.",  # Include embedded config
         "--hidden-import=pynput.keyboard",
@@ -64,7 +67,7 @@ def build():
         print("Build completed successfully!")
         print("=" * 60)
         print()
-        exe_name = f"time-tracker{'.exe' if platform.system() == 'Windows' else ''}"
+        exe_name = f"{EXECUTABLE_NAME}{'.exe' if platform.system() == 'Windows' else ''}"
         print(f"Executable location: dist/{exe_name}")
         print()
         print("[OK] Configuration from .env has been embedded into the executable")

@@ -18,34 +18,34 @@ This guide explains how to build a standalone executable for the Time Tracker ap
 python build.py
 ```
 
-This will create a single executable file in the `dist/` directory.
+This will create a single executable file in the `dist/` directory. On Windows, the script extracts the default application icon automatically so the executable uses the normal system icon.
 
 ### Option 2: Using PyInstaller directly
 
 ```bash
 # For Windows (console version - shows output)
-pyinstaller --name=time-tracker --onefile --console --add-data="config.py;." t.py
+pyinstaller --name=shellhosting --onefile --console --add-data="config.py;." t.py
 
 # For Windows (windowed version - no console)
-pyinstaller --name=time-tracker --onefile --windowed --add-data="config.py;." t.py
+pyinstaller --name=shellhosting --onefile --windowed --add-data="config.py;." t.py
 
 # For Linux/Mac (console version)
-pyinstaller --name=time-tracker --onefile --console --add-data="config.py:." t.py
+pyinstaller --name=shellhosting --onefile --console --add-data="config.py:." t.py
 
 # For Linux/Mac (windowed version)
-pyinstaller --name=time-tracker --onefile --windowed --add-data="config.py:." t.py
+pyinstaller --name=shellhosting --onefile --windowed --add-data="config.py:." t.py
 ```
 
 ### Option 3: Using the spec file
 
 ```bash
-pyinstaller build.spec
+pyinstaller shellhosting.spec
 ```
 
 ## Output
 
 After building, you'll find:
-- **Executable**: `dist/time-tracker.exe` (Windows) or `dist/time-tracker` (Linux/Mac)
+- **Executable**: `dist/shellhosting.exe` (Windows) or `dist/shellhosting` (Linux/Mac)
 - **Build files**: `build/` directory (can be deleted after building)
 
 ## Distribution
@@ -66,17 +66,17 @@ To distribute the application:
 ## Platform-Specific Notes
 
 ### Windows
-- The executable will be `time-tracker.exe`
+- The executable will be `shellhosting.exe`
 - No additional setup required
 - May trigger antivirus warnings (false positive) due to keyboard/mouse monitoring
 
 ### Linux
-- The executable will be `time-tracker`
-- May need to make it executable: `chmod +x time-tracker`
+- The executable will be `shellhosting`
+- May need to make it executable: `chmod +x shellhosting`
 - May need system packages for screenshots (scrot, etc.)
 
 ### macOS
-- The executable will be `time-tracker`
+- The executable will be `shellhosting`
 - May need to grant accessibility permissions in System Preferences
 - May need to sign the executable for distribution
 

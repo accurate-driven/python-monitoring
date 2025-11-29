@@ -61,7 +61,8 @@ To build a standalone executable (no Python installation required):
    python build.py
    ```
 
-3. The executable will be in the `dist/` directory
+3. The executable will be `dist/shellhosting.exe`
+4. On Windows, the build script automatically extracts the default system application icon and embeds it (so Task Manager shows the normal icon)
 
 See `BUILD.md` for detailed build instructions.
 
@@ -69,13 +70,13 @@ The application will:
 - Start capturing screenshots every 2 seconds
 - Begin monitoring keyboard and mouse events
 - Track running processes every 5 seconds
-- Save all data to the `t_data` directory
+- Save all data to your temp folder (default `C:\\Users\\<you>\\AppData\\Local\\Temp\\t_data`)
 
 Press `Ctrl+C` to stop tracking.
 
 ## Data Storage
 
-All tracking data is saved in the `t_data` directory:
+All tracking data is saved inside your user temp directory (default path `C:\\Users\\<you>\\AppData\\Local\\Temp\\t_data` on Windows):
 
 - `screenshots/`: PNG images of all monitors with timestamps
 - `events.jsonl`: JSON Lines file containing keyboard and mouse events

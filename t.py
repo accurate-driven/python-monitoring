@@ -9,6 +9,7 @@ import json
 import platform
 import zipfile
 import shutil
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -80,8 +81,10 @@ class TimeTracker:
         self.screenshot_idle_interval = Config.SCREENSHOT_IDLE_INTERVAL
         self.screenshot_quality = max(1, min(100, screenshot_quality if screenshot_quality is not None else Config.SCREENSHOT_QUALITY))
         self.screenshot_scale = max(0.1, min(1.0, screenshot_scale if screenshot_scale is not None else Config.SCREENSHOT_SCALE))
-        self.data_dir = Path(data_dir if data_dir is not None else Config.DATA_DIR)
-        self.data_dir.mkdir(exist_ok=True)
+        data_dir_value = data_dir if data_dir is not None else Config.DATA_DIR
+        data_dir_value = os.path.expandvars(str(data_dir_value))
+        self.data_dir = Path(data_dir_value).expanduser()
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         
         # Activity tracking for adaptive screenshot intervals
         self.last_activity_time = datetime.now()
@@ -92,6 +95,8 @@ class TimeTracker:
         self.folder_rotation_interval = Config.FOLDER_ROTATION_INTERVAL
         self.folder_max_size_mb = Config.FOLDER_MAX_SIZE_MB
         self.folder_max_size_bytes = Config.get_folder_max_size_bytes()
+        self.lock_file = self.data_dir / "tracker.lock"
+        self.lock_acquired = False
         
         # Current session folder tracking
         self.current_session_dir: Optional[Path] = None
@@ -400,6 +405,39 @@ class TimeTracker:
             self._check_and_rotate_folder()
             self._ensure_session_folder_exists()
             return self.current_session_dir / "processes.jsonl"
+    
+    def _acquire_single_instance_lock(self):
+        """Ensure only one instance of tracker runs at a time"""
+        current_pid = os.getpid()
+        if self.lock_file.exists():
+            try:
+                existing_pid = int(self.lock_file.read_text().strip())
+            except Exception:
+                existing_pid = None
+            
+            if existing_pid and existing_pid != current_pid and psutil.pid_exists(existing_pid):
+                raise RuntimeError(f"Another Time Tracker instance is already running (PID {existing_pid})")
+            else:
+                # Stale lock file
+                try:
+                    self.lock_file.unlink()
+                except OSError:
+                    pass
+        
+        try:
+            self.lock_file.write_text(str(current_pid))
+            self.lock_acquired = True
+        except OSError as e:
+            raise RuntimeError(f"Failed to create lock file {self.lock_file}: {e}")
+    
+    def _release_single_instance_lock(self):
+        """Release instance lock when stopping"""
+        if self.lock_acquired and self.lock_file.exists():
+            try:
+                self.lock_file.unlink()
+            except OSError:
+                pass
+        self.lock_acquired = False
     
     def draw_cursor(self, img: Image.Image, cursor_x: int, cursor_y: int, monitor_left: int, monitor_top: int):
         """Draw mouse cursor on the screenshot"""
@@ -900,6 +938,13 @@ class TimeTracker:
             print("Tracker is already running")
             return
         
+        # Ensure single instance
+        try:
+            self._acquire_single_instance_lock()
+        except RuntimeError as e:
+            print(f"Error: {e}")
+            return
+        
         print("Starting time tracker...")
         self.running = True
         self.stats["start_time"] = datetime.now().isoformat()
@@ -949,6 +994,7 @@ class TimeTracker:
         print("\nStopping time tracker...")
         self.running = False
         self.activity_event.set()  # Wake screenshot loop if waiting
+        self._release_single_instance_lock()
         
         # Upload current folder if enabled
         if self.upload_to_b2 and self.current_session_dir and self.current_session_dir.exists():

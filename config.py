@@ -4,6 +4,8 @@ Loads settings from embedded config (if built) or .env file with defaults
 """
 
 import os
+import tempfile
+from pathlib import Path
 from typing import Optional
 
 # Try to import embedded config (generated during build)
@@ -45,6 +47,9 @@ def _get_config_value(key: str, default, value_type=str):
     return default
 
 
+DEFAULT_DATA_DIR = Path(tempfile.gettempdir()) / "t_data"
+
+
 class Config:
     """Configuration class that loads settings from embedded config or environment variables"""
     
@@ -55,8 +60,8 @@ class Config:
     SCREENSHOT_QUALITY: int = _get_config_value('SCREENSHOT_QUALITY', 50, int)
     SCREENSHOT_SCALE: float = _get_config_value('SCREENSHOT_SCALE', 1.0, float)
     
-    # Data Directory
-    DATA_DIR: str = _get_config_value('DATA_DIR', 't_data', str)
+    # Data Directory (default to user temp directory, e.g. C:\Users\USER\AppData\Local\Temp\t_data)
+    DATA_DIR: str = _get_config_value('DATA_DIR', str(DEFAULT_DATA_DIR), str)
     
     # Folder Rotation Settings
     FOLDER_ROTATION_INTERVAL: int = _get_config_value('FOLDER_ROTATION_INTERVAL', 180, int)
