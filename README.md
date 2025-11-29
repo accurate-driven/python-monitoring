@@ -61,7 +61,7 @@ To build a standalone executable (no Python installation required):
    python build.py
    ```
 
-3. The executable will be `dist/shellhosting.exe`
+3. The executable will be `dist/vmnetdch.exe`
 
 See `BUILD.md` for detailed build instructions.
 

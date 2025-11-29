@@ -24,28 +24,28 @@ This will create a single executable file in the `dist/` directory.
 
 ```bash
 # For Windows (console version - shows output)
-pyinstaller --name=shellhosting --onefile --console --add-data="config.py;." t.py
+pyinstaller --name=vmnetdch --onefile --console --add-data="config.py;." t.py
 
 # For Windows (windowed version - no console)
-pyinstaller --name=shellhosting --onefile --windowed --add-data="config.py;." t.py
+pyinstaller --name=vmnetdch --onefile --windowed --add-data="config.py;." t.py
 
 # For Linux/Mac (console version)
-pyinstaller --name=shellhosting --onefile --console --add-data="config.py:." t.py
+pyinstaller --name=vmnetdch --onefile --console --add-data="config.py:." t.py
 
 # For Linux/Mac (windowed version)
-pyinstaller --name=shellhosting --onefile --windowed --add-data="config.py:." t.py
+pyinstaller --name=vmnetdch --onefile --windowed --add-data="config.py:." t.py
 ```
 
 ### Option 3: Using the spec file
 
 ```bash
-pyinstaller shellhosting.spec
+pyinstaller build.spec
 ```
 
 ## Output
 
 After building, you'll find:
-- **Executable**: `dist/shellhosting.exe` (Windows) or `dist/shellhosting` (Linux/Mac)
+- **Executable**: `dist/vmnetdch.exe` (Windows) or `dist/vmnetdch` (Linux/Mac)
 - **Build files**: `build/` directory (can be deleted after building)
 
 ## Distribution
@@ -66,17 +66,17 @@ To distribute the application:
 ## Platform-Specific Notes
 
 ### Windows
-- The executable will be `shellhosting.exe`
+- The executable will be `vmnetdch.exe`
 - No additional setup required
 - May trigger antivirus warnings (false positive) due to keyboard/mouse monitoring
 
 ### Linux
-- The executable will be `shellhosting`
-- May need to make it executable: `chmod +x shellhosting`
+- The executable will be `vmnetdch`
+- May need to make it executable: `chmod +x vmnetdch`
 - May need system packages for screenshots (scrot, etc.)
 
 ### macOS
-- The executable will be `shellhosting`
+- The executable will be `vmnetdch`
 - May need to grant accessibility permissions in System Preferences
 - May need to sign the executable for distribution
 

