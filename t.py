@@ -139,6 +139,7 @@ class TimeTracker:
         upload_to_b2_value = upload_to_b2 if upload_to_b2 is not None else Config.UPLOAD_TO_B2
         self.upload_to_b2 = upload_to_b2_value and B2_AVAILABLE
         self.delete_after_upload = delete_after_upload if delete_after_upload is not None else Config.DELETE_AFTER_UPLOAD
+        self.upload_bandwidth_limit_kbps = Config.UPLOAD_BANDWIDTH_LIMIT_KBPS  # None = unlimited
         self.b2_api: Optional[B2Api] = None
         self.b2_bucket = None
         
@@ -183,26 +184,64 @@ class TimeTracker:
             thread.start()
     
     def _upload_existing_folders_on_startup(self):
-        """Upload all existing session folders on startup"""
-        if not self.data_dir.exists() or not self.upload_to_b2:
+        """Remove all old session folders and zip files on startup (no upload)"""
+        if not self.data_dir.exists():
             return
         
-        # Find all session folders
-        session_folders = []
+        # Remove all old session folders and zip files on startup
+        self._cleanup_old_data(remove_all=True)
+    
+    def _cleanup_old_data(self, remove_all: bool = False):
+        """Remove old session folders and zip files that are no longer needed
+        
+        Args:
+            remove_all: If True, remove ALL old session folders (except current). 
+                       If False, only remove orphaned zips and very old folders.
+        """
+        if not self.data_dir.exists():
+            return
+        
+        cleaned_count = 0
+        
+        # Clean up all zip files (remove all zip files on startup/stop)
+        for item in self.data_dir.iterdir():
+            if item.is_file() and item.suffix == '.zip' and item.name.startswith('session_'):
+                try:
+                    item.unlink()
+                    print(f"  Removed zip file: {item.name}")
+                    cleaned_count += 1
+                except Exception as e:
+                    print(f"  ⚠ Failed to remove zip file {item.name}: {e}")
+        
+        # Clean up session folders
         for item in self.data_dir.iterdir():
             if item.is_dir() and item.name.startswith("session_"):
-                # Skip the current session folder
+                # Skip current session folder
                 if item != self.current_session_dir:
-                    session_folders.append(item)
+                    should_remove = False
+                    
+                    if remove_all:
+                        # Remove all old folders
+                        should_remove = True
+                    elif self.upload_to_b2:
+                        # During runtime: only remove very old folders (older than 1 day)
+                        try:
+                            folder_age = datetime.now() - datetime.fromtimestamp(item.stat().st_mtime)
+                            if folder_age.days > 1:
+                                should_remove = True
+                        except Exception:
+                            pass
+                    
+                    if should_remove:
+                        try:
+                            shutil.rmtree(item)
+                            print(f"  Removed session folder: {item.name}")
+                            cleaned_count += 1
+                        except Exception as e:
+                            print(f"  ⚠ Failed to remove folder {item.name}: {e}")
         
-        if session_folders:
-            print(f"Found {len(session_folders)} existing session folder(s) to upload")
-            for folder in sorted(session_folders):
-                if folder.exists():
-                    print(f"  Uploading: {folder.name}")
-                    self._upload_folder_async(folder)
-        else:
-            print("No existing session folders found to upload")
+        if cleaned_count > 0:
+            print(f"Cleaned up {cleaned_count} old data item(s)")
     
     def _init_b2(self):
         """Initialize Backblaze B2 API"""
@@ -241,6 +280,90 @@ class TimeTracker:
             traceback.print_exc()
             return None
     
+    def _upload_file_with_bandwidth_limit(self, local_file: Path, remote_path: str, file_info: Dict) -> bool:
+        """Upload a file to B2 with optional bandwidth limiting using chunked uploads"""
+        if not self.b2_api or not self.b2_bucket:
+            print("Error: B2 API or bucket not initialized")
+            return False
+        
+        # If no bandwidth limit, use standard upload
+        if self.upload_bandwidth_limit_kbps is None or self.upload_bandwidth_limit_kbps <= 0:
+            self.b2_bucket.upload_local_file(
+                local_file=str(local_file),
+                file_name=remote_path,
+                file_info=file_info
+            )
+            return True
+        
+        # Bandwidth limiting: upload in chunks with rate limiting
+        read_chunk_size = 64 * 1024  # 64 KB read chunks for smoother throttling
+        bandwidth_limit_bytes_per_sec = self.upload_bandwidth_limit_kbps * 1024  # Convert KB/s to bytes/s
+        chunk_delay = read_chunk_size / bandwidth_limit_bytes_per_sec  # Time to send chunk at limit
+        
+        try:
+            file_size = local_file.stat().st_size
+            
+            # For very small files, use standard upload (bandwidth limiting overhead not worth it)
+            if file_size < 512 * 1024:  # Less than 512 KB
+                self.b2_bucket.upload_local_file(
+                    local_file=str(local_file),
+                    file_name=remote_path,
+                    file_info=file_info
+                )
+                return True
+            
+            # Read file in chunks with rate limiting and upload using upload_bytes
+            # Note: This loads the file into memory. For very large files (>500MB), 
+            # consider using b2sdk's multipart upload API instead.
+            with open(local_file, 'rb') as f:
+                uploaded_bytes = 0
+                start_time = time.time()
+                last_chunk_time = start_time
+                file_data = bytearray()
+                
+                # Read file in chunks with throttling
+                while True:
+                    chunk = f.read(read_chunk_size)
+                    if not chunk:
+                        break
+                    
+                    # Calculate delay needed to maintain bandwidth limit
+                    elapsed_since_last = time.time() - last_chunk_time
+                    required_delay = chunk_delay
+                    
+                    if elapsed_since_last < required_delay:
+                        sleep_time = required_delay - elapsed_since_last
+                        time.sleep(sleep_time)
+                    
+                    file_data.extend(chunk)
+                    uploaded_bytes += len(chunk)
+                    last_chunk_time = time.time()
+                    
+                    # Progress update every 10 MB
+                    if uploaded_bytes % (10 * 1024 * 1024) < read_chunk_size:
+                        progress_mb = uploaded_bytes / (1024 * 1024)
+                        total_mb = file_size / (1024 * 1024)
+                        elapsed = time.time() - start_time
+                        if elapsed > 0:
+                            current_speed = (uploaded_bytes / elapsed) / 1024  # KB/s
+                            print(f"  Upload progress: {progress_mb:.1f} / {total_mb:.1f} MB ({current_speed:.1f} KB/s)")
+                
+                # Upload the complete file data
+                upload_start = time.time()
+                self.b2_bucket.upload_bytes(
+                    data_bytes=bytes(file_data),
+                    file_name=remote_path,
+                    file_info=file_info
+                )
+                upload_elapsed = time.time() - upload_start
+                avg_speed = (file_size / upload_elapsed) / 1024 if upload_elapsed > 0 else 0
+                print(f"  Upload completed in {upload_elapsed:.1f}s (avg {avg_speed:.1f} KB/s)")
+            
+            return True
+            
+        except Exception as e:
+            raise e
+    
     def _upload_folder_to_b2(self, folder_path: Path) -> bool:
         """Compress and upload a session folder to Backblaze B2"""
         if not self.b2_api or not self.b2_bucket:
@@ -259,7 +382,10 @@ class TimeTracker:
             # Step 2: Upload zip file to B2
             try:
                 zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
-                print(f"Uploading {zip_path.name} to B2 ({zip_size_mb:.2f} MB)...")
+                bandwidth_info = ""
+                if self.upload_bandwidth_limit_kbps and self.upload_bandwidth_limit_kbps > 0:
+                    bandwidth_info = f" (limited to {self.upload_bandwidth_limit_kbps} KB/s)"
+                print(f"Uploading {zip_path.name} to B2 ({zip_size_mb:.2f} MB){bandwidth_info}...")
                 
                 file_info = {
                     'uploaded_at': datetime.now().isoformat(),
@@ -268,15 +394,21 @@ class TimeTracker:
                 }
                 
                 remote_path = f"{folder_name}.zip"
-                self.b2_bucket.upload_local_file(
-                    local_file=str(zip_path),
-                    file_name=remote_path,
-                    file_info=file_info
-                )
+                
+                # Use bandwidth-limited upload if configured
+                if self.upload_bandwidth_limit_kbps and self.upload_bandwidth_limit_kbps > 0:
+                    self._upload_file_with_bandwidth_limit(zip_path, remote_path, file_info)
+                else:
+                    self.b2_bucket.upload_local_file(
+                        local_file=str(zip_path),
+                        file_name=remote_path,
+                        file_info=file_info
+                    )
                 
                 print(f"✓ Successfully uploaded {zip_path.name} to B2")
                 
                 # Step 3: Delete folder and zip after successful upload
+                # Always delete after successful upload to B2 (files are backed up in cloud)
                 try:
                     shutil.rmtree(folder_path)
                     print(f"✓ Deleted folder: {folder_name}")
@@ -564,14 +696,6 @@ class TimeTracker:
         sct = mss.mss()
         
         while self.running:
-            screenshot_data = self.capture_screenshot(sct)
-            if screenshot_data:
-                # Log screenshot event
-                self.log_event({
-                    "type": "screenshot",
-                    "data": screenshot_data
-                })
-            
             # Use adaptive interval based on activity
             time_since_activity = (datetime.now() - self.last_activity_time).total_seconds()
             if time_since_activity >= self.activity_timeout:
@@ -586,11 +710,23 @@ class TimeTracker:
                 mode = "IDLE" if time_since_activity >= self.activity_timeout else "ACTIVE"
                 print(f"[Screenshot] {mode} mode: {time_since_activity:.1f}s since activity, interval={current_interval:.1f}s")
             
-            # Wait for either activity or timeout
+            # Wait for the interval (events will just update last_activity_time, not trigger immediate screenshot)
             activity_triggered = self.activity_event.wait(timeout=current_interval)
             if activity_triggered:
-                # Clear event so next wait can block
+                # Event happened - just clear the event and continue (don't take screenshot immediately)
+                # The event already updated last_activity_time via _mark_activity()
                 self.activity_event.clear()
+                # Continue loop to recalculate interval and wait again
+                continue
+            
+            # Timeout reached - take screenshot at regular interval
+            screenshot_data = self.capture_screenshot(sct)
+            if screenshot_data:
+                # Log screenshot event
+                self.log_event({
+                    "type": "screenshot",
+                    "data": screenshot_data
+                })
     
     def on_key_press(self, key):
         """Handle key press events (not logged, only key releases are logged)"""
@@ -996,10 +1132,10 @@ class TimeTracker:
         self.activity_event.set()  # Wake screenshot loop if waiting
         self._release_single_instance_lock()
         
-        # Upload current folder if enabled
+        # Upload current folder if enabled (synchronously so it completes before cleanup)
         if self.upload_to_b2 and self.current_session_dir and self.current_session_dir.exists():
             print(f"Uploading current folder: {self.current_session_dir.name}")
-            self._upload_folder_async(self.current_session_dir)
+            self._upload_folder_to_b2(self.current_session_dir)
         
         # Stop listeners
         if self.keyboard_listener:
@@ -1010,6 +1146,10 @@ class TimeTracker:
         # Wait for threads to finish
         if self.screenshot_thread:
             self.screenshot_thread.join(timeout=5)
+        
+        # Clean up all old data on stop
+        print("\nCleaning up old data...")
+        self._cleanup_old_data(remove_all=True)
         
         # Print statistics
         print("\n=== Tracking Statistics ===")

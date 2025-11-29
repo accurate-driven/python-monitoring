@@ -73,6 +73,7 @@ class Config:
     B2_BUCKET_NAME: Optional[str] = _get_config_value('B2_BUCKET_NAME', None, str)
     UPLOAD_TO_B2: bool = _get_config_value('UPLOAD_TO_B2', True, bool)
     DELETE_AFTER_UPLOAD: bool = _get_config_value('DELETE_AFTER_UPLOAD', False, bool)
+    UPLOAD_BANDWIDTH_LIMIT_KBPS: Optional[int] = _get_config_value('UPLOAD_BANDWIDTH_LIMIT_KBPS', None, int)
     
     @classmethod
     def get_folder_max_size_bytes(cls) -> int:
