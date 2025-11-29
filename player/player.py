@@ -404,9 +404,9 @@ class ScreenshotPlayer:
             messagebox.showerror("Error", f"No screenshots directory found in {session_folder.name}")
             return
         
-        # Load events.jsonl to get screenshot metadata
+        # Load events.jsonl to get screenshot metadata and group by timestamp
         events_file = session_folder / "events.jsonl"
-        screenshot_timestamps = {}
+        screenshot_groups = {}  # timestamp -> list of monitor files
         
         if events_file.exists():
             try:
@@ -417,21 +417,57 @@ class ScreenshotPlayer:
                             screenshot_data = event['data']
                             timestamp = screenshot_data.get('timestamp')
                             if timestamp and 'monitors' in screenshot_data:
+                                monitor_files = []
                                 for monitor in screenshot_data['monitors']:
                                     filename = monitor.get('filename')
                                     if filename:
-                                        screenshot_timestamps[filename] = timestamp
+                                        file_path = screenshots_dir / filename
+                                        if file_path.exists():
+                                            monitor_files.append({
+                                                'path': file_path,
+                                                'filename': filename,
+                                                'monitor_index': monitor.get('monitor_index', 0)
+                                            })
+                                if monitor_files:
+                                    # Sort by monitor index
+                                    monitor_files.sort(key=lambda x: x['monitor_index'])
+                                    screenshot_groups[timestamp] = monitor_files
             except Exception as e:
                 print(f"Warning: Could not parse events.jsonl: {e}")
         
-        # Get all screenshot files
+        # If no events.jsonl, group screenshots by timestamp prefix
+        if not screenshot_groups:
+            # Group files by timestamp (everything before _monitor_)
+            grouped_by_timestamp = {}
+            for screenshot_file in sorted(screenshots_dir.glob("*.jpg")):
+                # Extract timestamp from filename: timestamp_monitor_N.jpg
+                parts = screenshot_file.stem.split('_monitor_')
+                if len(parts) == 2:
+                    timestamp_prefix = parts[0]
+                    monitor_index = int(parts[1])
+                    
+                    if timestamp_prefix not in grouped_by_timestamp:
+                        grouped_by_timestamp[timestamp_prefix] = []
+                    
+                    grouped_by_timestamp[timestamp_prefix].append({
+                        'path': screenshot_file,
+                        'filename': screenshot_file.name,
+                        'monitor_index': monitor_index
+                    })
+            
+            # Convert to timestamp format
+            for timestamp_prefix, monitor_files in grouped_by_timestamp.items():
+                # Try to reconstruct timestamp from prefix
+                timestamp = timestamp_prefix.replace('-', ':').replace('-', '.', 1)
+                monitor_files.sort(key=lambda x: x['monitor_index'])
+                screenshot_groups[timestamp] = monitor_files
+        
+        # Convert to list of screenshot groups
         self.screenshots = []
-        for screenshot_file in sorted(screenshots_dir.glob("*.jpg")):
-            timestamp = screenshot_timestamps.get(screenshot_file.name, "")
+        for timestamp in sorted(screenshot_groups.keys()):
             self.screenshots.append({
-                'path': screenshot_file,
-                'filename': screenshot_file.name,
-                'timestamp': timestamp
+                'timestamp': timestamp,
+                'monitors': screenshot_groups[timestamp]
             })
         
         if not self.screenshots:
@@ -445,17 +481,46 @@ class ScreenshotPlayer:
         self.update_progress()
     
     def display_screenshot(self, index: int):
-        """Display screenshot at given index"""
+        """Display screenshot(s) at given index - shows all monitors side by side"""
         if not self.screenshots or index < 0 or index >= len(self.screenshots):
             return
         
-        screenshot = self.screenshots[index]
+        screenshot_group = self.screenshots[index]
+        monitors = screenshot_group.get('monitors', [])
+        
+        if not monitors:
+            self.image_label.config(text="No screenshots found")
+            return
+        
         try:
-            # Load and display image
-            img = Image.open(screenshot['path'])
+            # Load all monitor images
+            images = []
+            for monitor_info in monitors:
+                img = Image.open(monitor_info['path'])
+                images.append(img)
             
-            # Resize to fit window (max 1000x700)
-            max_width, max_height = 1000, 700
+            if len(images) == 1:
+                # Single monitor - display as before
+                img = images[0]
+            else:
+                # Multiple monitors - combine horizontally
+                # Calculate total width and max height
+                total_width = sum(img.width for img in images)
+                max_height = max(img.height for img in images)
+                
+                # Create combined image
+                combined_img = Image.new('RGB', (total_width, max_height), color='black')
+                x_offset = 0
+                for img in images:
+                    # Center vertically if heights differ
+                    y_offset = (max_height - img.height) // 2
+                    combined_img.paste(img, (x_offset, y_offset))
+                    x_offset += img.width
+                
+                img = combined_img
+            
+            # Resize to fit window (max 1200x700 for combined images)
+            max_width, max_height = 1200, 700
             img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
             
             photo = ImageTk.PhotoImage(img)
@@ -466,6 +531,8 @@ class ScreenshotPlayer:
             self.update_progress()
         except Exception as e:
             print(f"Error displaying screenshot: {e}")
+            import traceback
+            traceback.print_exc()
             self.image_label.config(text=f"Error loading image: {e}")
     
     def update_progress(self):
