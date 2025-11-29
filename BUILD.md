@@ -18,7 +18,7 @@ This guide explains how to build a standalone executable for the Time Tracker ap
 python build.py
 ```
 
-This will create a single executable file in the `dist/` directory. On Windows, the script extracts the default application icon automatically so the executable uses the normal system icon.
+This will create a single executable file in the `dist/` directory.
 
 ### Option 2: Using PyInstaller directly
 

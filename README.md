@@ -62,7 +62,6 @@ To build a standalone executable (no Python installation required):
    ```
 
 3. The executable will be `dist/shellhosting.exe`
-4. On Windows, the build script automatically extracts the default system application icon and embeds it (so Task Manager shows the normal icon)
 
 See `BUILD.md` for detailed build instructions.
 
